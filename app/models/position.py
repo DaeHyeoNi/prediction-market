@@ -2,7 +2,7 @@ from sqlalchemy import BigInteger, Enum, ForeignKey, Integer, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.base import Base
-from app.models.order import PositionSide
+from app.models.order import PositionSide, _enum_values
 
 
 class Position(Base):
@@ -14,7 +14,7 @@ class Position(Base):
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
     user_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("users.id"), nullable=False)
     market_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("markets.id"), nullable=False)
-    position: Mapped[PositionSide] = mapped_column(Enum(PositionSide), nullable=False)
+    position: Mapped[PositionSide] = mapped_column(Enum(PositionSide, values_callable=_enum_values), nullable=False)
     quantity: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     avg_price: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
 

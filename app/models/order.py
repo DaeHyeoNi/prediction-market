@@ -34,6 +34,10 @@ class OrderStatus(str, enum.Enum):
     CANCELLED = "Cancelled"
 
 
+def _enum_values(enum_cls):
+    return [e.value for e in enum_cls]
+
+
 class Order(Base):
     __tablename__ = "orders"
     __table_args__ = (
@@ -55,13 +59,13 @@ class Order(Base):
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
     user_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("users.id"), nullable=False)
     market_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("markets.id"), nullable=False)
-    position: Mapped[PositionSide] = mapped_column(Enum(PositionSide), nullable=False)
-    order_type: Mapped[OrderType] = mapped_column(Enum(OrderType), nullable=False)
+    position: Mapped[PositionSide] = mapped_column(Enum(PositionSide, values_callable=_enum_values), nullable=False)
+    order_type: Mapped[OrderType] = mapped_column(Enum(OrderType, values_callable=_enum_values), nullable=False)
     price: Mapped[int] = mapped_column(Integer, nullable=False)
     quantity: Mapped[int] = mapped_column(Integer, nullable=False)
     remaining_quantity: Mapped[int] = mapped_column(Integer, nullable=False)
     status: Mapped[OrderStatus] = mapped_column(
-        Enum(OrderStatus), default=OrderStatus.PENDING, nullable=False
+        Enum(OrderStatus, values_callable=_enum_values), default=OrderStatus.PENDING, nullable=False
     )
     locked_points: Mapped[int] = mapped_column(BigInteger, default=0, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())

@@ -18,6 +18,10 @@ class MarketResult(str, enum.Enum):
     NO = "NO"
 
 
+def _enum_values(enum_cls):
+    return [e.value for e in enum_cls]
+
+
 class Market(Base):
     __tablename__ = "markets"
 
@@ -26,9 +30,11 @@ class Market(Base):
     description: Mapped[str] = mapped_column(Text, nullable=True)
     closes_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     status: Mapped[MarketStatus] = mapped_column(
-        Enum(MarketStatus), default=MarketStatus.OPEN, nullable=False
+        Enum(MarketStatus, values_callable=_enum_values), default=MarketStatus.OPEN, nullable=False
     )
-    result: Mapped[MarketResult | None] = mapped_column(Enum(MarketResult), nullable=True)
+    result: Mapped[MarketResult | None] = mapped_column(
+        Enum(MarketResult, values_callable=_enum_values), nullable=True
+    )
     created_by: Mapped[int] = mapped_column(BigInteger, ForeignKey("users.id"), nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
