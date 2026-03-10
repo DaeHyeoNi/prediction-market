@@ -3,10 +3,10 @@ from typing import Optional
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy.future import select
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import joinedload
+from sqlalchemy.orm import contains_eager, joinedload
 
 from app.dependencies import get_current_user, get_db
-from app.models.market import MarketStatus
+from app.models.market import Market, MarketStatus
 from app.models.position import Position
 from app.models.user import User
 from app.schemas.position import PositionResponse
@@ -41,24 +41,29 @@ async def list_positions(
     - status=resolved: 청산된 마켓의 포지션 (손익 포함)
     - status=all: 전체
     """
-    query = (
-        select(Position)
-        .options(joinedload(Position.market))
-        .where(Position.user_id == current_user.id)
-    )
+    if status == "resolved":
+        # JOIN으로 Market 필터링 + contains_eager로 eager load
+        query = (
+            select(Position)
+            .join(Position.market)
+            .options(contains_eager(Position.market))
+            .where(
+                Position.user_id == current_user.id,
+                Market.status == MarketStatus.RESOLVED,
+            )
+        )
+    else:
+        query = (
+            select(Position)
+            .options(joinedload(Position.market))
+            .where(Position.user_id == current_user.id)
+        )
+        if status != "all":
+            # active: quantity > 0
+            query = query.where(Position.quantity > 0)
 
     if market_id is not None:
         query = query.where(Position.market_id == market_id)
-
-    if status == "resolved":
-        from sqlalchemy import join
-        from app.models.market import Market
-        query = query.join(Position.market).where(Market.status == MarketStatus.RESOLVED)
-    elif status == "all":
-        pass
-    else:
-        # active: quantity > 0
-        query = query.where(Position.quantity > 0)
 
     result = await db.execute(query)
     positions = result.scalars().all()

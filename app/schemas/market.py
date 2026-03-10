@@ -22,6 +22,7 @@ class MarketResponse(BaseModel):
     created_by: int
     created_at: datetime
     resolved_at: Optional[datetime]
+    last_trade_price: Optional[int] = None
 
     class Config:
         from_attributes = True

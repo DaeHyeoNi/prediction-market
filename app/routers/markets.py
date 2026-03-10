@@ -1,6 +1,7 @@
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
+from sqlalchemy import func
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
 from sqlalchemy.orm import joinedload
@@ -28,8 +29,37 @@ async def list_markets(
     if status:
         query = query.where(Market.status == status)
     query = query.offset(offset).limit(limit).order_by(Market.created_at.desc())
-    result = await db.execute(query)
-    return result.scalars().all()
+    markets = (await db.execute(query)).scalars().all()
+
+    if not markets:
+        return []
+
+    # 마켓별 최근 체결가를 단일 쿼리로 조회 (ROW_NUMBER 윈도우 함수)
+    market_ids = [m.id for m in markets]
+    ranked = (
+        select(
+            Trade.market_id,
+            Trade.price,
+            func.row_number().over(
+                partition_by=Trade.market_id,
+                order_by=Trade.created_at.desc(),
+            ).label("rn"),
+        )
+        .where(Trade.market_id.in_(market_ids))
+        .subquery()
+    )
+    last_prices_result = await db.execute(
+        select(ranked.c.market_id, ranked.c.price).where(ranked.c.rn == 1)
+    )
+    last_price_map: dict[int, int] = {row.market_id: row.price for row in last_prices_result}
+
+    return [
+        MarketResponse(
+            **{c.name: getattr(m, c.name) for c in Market.__table__.columns},
+            last_trade_price=last_price_map.get(m.id),
+        )
+        for m in markets
+    ]
 
 
 @router.post("", response_model=MarketResponse, status_code=201)
