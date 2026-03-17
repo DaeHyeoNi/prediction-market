@@ -15,22 +15,23 @@ Point Flow:
     - available_points += trade_price * fill_qty
     - seller's position decreases
 
-Mirror match rules:
-    YES BID at B can match: YES ASK at p<=B (direct) OR NO ASK at p<=(100-B) (mirror) OR NO BID at p>=(100-B) (contract)
-    YES ASK at A can match: YES BID at p>=A (direct) OR NO BID at p>=(100-A) (mirror)
-    NO BID at B can match:  NO ASK at p<=B (direct)  OR YES ASK at p<=(100-B) (mirror) OR YES BID at p>=(100-B) (contract)
-    NO ASK at A can match:  NO BID at p>=A (direct)  OR YES BID at p>=(100-A) (mirror)
+Match rules (3-case model):
+    YES BID at B:  YES ASK at p<=B (direct)  OR  NO BID at p>=(100-B) (contract creation)
+    YES ASK at A:  YES BID at p>=A (direct)  OR  NO ASK at p<=(100-A) (contract destruction)
+    NO BID at B:   NO ASK at p<=B (direct)   OR  YES BID at p>=(100-B) (contract creation)
+    NO ASK at A:   NO BID at p>=A (direct)   OR  YES ASK at p<=(100-A) (contract destruction)
 
-Contract creation (BID vs BID):
+Contract creation (BID vs BID, opposite sides):
     YES BID(B_yes) + NO BID(B_no) where B_yes + B_no >= 100 → new contract
-    - YES buyer pays: 100 - B_no  (gets excess refund if B_yes > 100-B_no)
-    - NO buyer pays:  B_no        (maker always pays their bid, no excess)
-    - Both sides receive their respective positions (no existing positions required)
+    - YES buyer pays: 100 - B_no  (excess refunded if B_yes > 100-B_no)
+    - NO buyer pays:  B_no        (maker always pays their bid price)
+    - Both receive their respective positions
 
-Mirror trade example (YES BID=70 vs NO ASK=30):
-    - Trade price from YES buyer perspective = 70 (locked at 70, no refund)
-    - Trade price from NO seller perspective = 30 (they receive 30 per unit)
-    - 70 + 30 = 100 (money conservation)
+Contract destruction (ASK vs ASK, opposite sides):
+    YES ASK(A_yes) + NO ASK(A_no) where A_yes + A_no <= 100 → destroy contract
+    - YES seller receives: 100 - A_no
+    - NO seller receives:  A_no
+    - Both lose their respective positions; pool releases 100 pts total
 
 Direct trade example (YES BID=70 vs YES ASK=65):
     - Trade price = 65 (maker's ask price)
@@ -54,9 +55,8 @@ async def _find_best_maker(session: AsyncSession, taker: Order) -> Order | None:
     opposite = PositionSide.NO if taker.position == PositionSide.YES else PositionSide.YES
     mirror_threshold = 100 - taker.price
 
-    contract_q = None
     if taker.order_type == OrderType.BID:
-        # Taker is buying: find the cheapest ask (direct or mirror) or opposite BID (contract creation)
+        # Direct: same position ASK, price <= taker.price (cheapest ask first)
         direct_q = (
             select(Order)
             .where(
@@ -66,19 +66,7 @@ async def _find_best_maker(session: AsyncSession, taker: Order) -> Order | None:
                 Order.status.in_(ACTIVE_STATUSES),
                 Order.price <= taker.price,
                 Order.id != taker.id,
-            )
-            .order_by(Order.price.asc(), Order.created_at.asc())
-            .limit(1)
-        )
-        mirror_q = (
-            select(Order)
-            .where(
-                Order.market_id == taker.market_id,
-                Order.position == opposite,
-                Order.order_type == OrderType.ASK,
-                Order.status.in_(ACTIVE_STATUSES),
-                Order.price <= mirror_threshold,
-                Order.id != taker.id,
+                Order.user_id != taker.user_id,
             )
             .order_by(Order.price.asc(), Order.created_at.asc())
             .limit(1)
@@ -94,12 +82,13 @@ async def _find_best_maker(session: AsyncSession, taker: Order) -> Order | None:
                 Order.status.in_(ACTIVE_STATUSES),
                 Order.price >= mirror_threshold,
                 Order.id != taker.id,
+                Order.user_id != taker.user_id,
             )
             .order_by(Order.price.desc(), Order.created_at.asc())
             .limit(1)
         )
     else:
-        # Taker is selling: find the highest bid (direct or mirror)
+        # Direct: same position BID, price >= taker.price (highest bid first)
         direct_q = (
             select(Order)
             .where(
@@ -109,27 +98,30 @@ async def _find_best_maker(session: AsyncSession, taker: Order) -> Order | None:
                 Order.status.in_(ACTIVE_STATUSES),
                 Order.price >= taker.price,
                 Order.id != taker.id,
+                Order.user_id != taker.user_id,
             )
             .order_by(Order.price.desc(), Order.created_at.asc())
             .limit(1)
         )
-        mirror_q = (
+        # Contract destruction: opposite ASK at price <= (100 - taker.price)
+        # Lower maker price = higher effective income for taker (100 - maker.price)
+        contract_q = (
             select(Order)
             .where(
                 Order.market_id == taker.market_id,
                 Order.position == opposite,
-                Order.order_type == OrderType.BID,
+                Order.order_type == OrderType.ASK,
                 Order.status.in_(ACTIVE_STATUSES),
-                Order.price >= mirror_threshold,
+                Order.price <= mirror_threshold,
                 Order.id != taker.id,
+                Order.user_id != taker.user_id,
             )
-            .order_by(Order.price.desc(), Order.created_at.asc())
+            .order_by(Order.price.asc(), Order.created_at.asc())
             .limit(1)
         )
 
     direct = (await session.execute(direct_q)).scalar_one_or_none()
-    mirror = (await session.execute(mirror_q)).scalar_one_or_none()
-    contract = (await session.execute(contract_q)).scalar_one_or_none() if contract_q is not None else None
+    contract = (await session.execute(contract_q)).scalar_one_or_none()
 
     # Collect candidates with their effective prices and pick the best
     if taker.order_type == OrderType.BID:
@@ -137,8 +129,6 @@ async def _find_best_maker(session: AsyncSession, taker: Order) -> Order | None:
         candidates = []
         if direct is not None:
             candidates.append((direct.price, direct.created_at, direct))
-        if mirror is not None:
-            candidates.append((100 - mirror.price, mirror.created_at, mirror))
         if contract is not None:
             candidates.append((100 - contract.price, contract.created_at, contract))
         if not candidates:
@@ -150,8 +140,8 @@ async def _find_best_maker(session: AsyncSession, taker: Order) -> Order | None:
         candidates = []
         if direct is not None:
             candidates.append((direct.price, direct.created_at, direct))
-        if mirror is not None:
-            candidates.append((100 - mirror.price, mirror.created_at, mirror))
+        if contract is not None:
+            candidates.append((100 - contract.price, contract.created_at, contract))
         if not candidates:
             return None
         candidates.sort(key=lambda x: (-x[0], x[1]))
@@ -225,17 +215,18 @@ async def match_order(session: AsyncSession, order_id: int) -> None:
         if maker is None:
             break
 
-        is_mirror = taker.position != maker.position
-        is_contract = taker.order_type == OrderType.BID and maker.order_type == OrderType.BID
+        is_contract_creation = taker.order_type == OrderType.BID and maker.order_type == OrderType.BID
+        is_contract_destruction = (
+            taker.order_type == OrderType.ASK
+            and maker.order_type == OrderType.ASK
+            and taker.position != maker.position
+        )
         fill_qty = min(taker.remaining_quantity, maker.remaining_quantity)
 
         # Effective trade prices from each side's perspective:
         # Direct match: both sides trade at maker.price
-        # Mirror/Contract match: taker pays/receives (100 - maker.price), maker pays/receives maker.price
-        if is_mirror:
-            # e.g. YES BID(70) vs NO ASK(30): taker_trade_price=70, maker_trade_price=30
-            # e.g. YES BID(70) vs NO BID(35): taker_trade_price=65, maker_trade_price=35 (contract)
-            # e.g. YES ASK(30) vs NO BID(70): taker_trade_price=30, maker_trade_price=70
+        # Contract creation/destruction: taker pays/receives (100 - maker.price), maker pays/receives maker.price
+        if is_contract_creation or is_contract_destruction:
             taker_trade_price = 100 - maker.price
             maker_trade_price = maker.price
         else:
@@ -253,7 +244,7 @@ async def match_order(session: AsyncSession, order_id: int) -> None:
         )
         session.add(trade)
 
-        if is_contract:
+        if is_contract_creation:
             # Contract creation: both sides are BID (buyers), both gain new positions
             # Taker: pays taker_trade_price, locked taker.price → excess refund
             # Maker: pays maker_trade_price (= maker.price), no excess
@@ -284,6 +275,29 @@ async def match_order(session: AsyncSession, order_id: int) -> None:
             # Both gain their respective positions
             await _upsert_position(session, taker.user_id, taker.market_id, taker.position, fill_qty, taker_trade_price, is_buy=True)
             await _upsert_position(session, maker.user_id, maker.market_id, maker.position, fill_qty, maker_trade_price, is_buy=True)
+
+        elif is_contract_destruction:
+            # Contract destruction: both sides are ASK (sellers), both gain points and lose positions
+            # Taker receives (100 - maker.price), maker receives maker.price; total = 100 (pool release)
+            taker_user = await _get_user_locked(session, taker.user_id)
+            if maker.user_id != taker.user_id:
+                maker_user = await _get_user_locked(session, maker.user_id)
+            else:
+                maker_user = taker_user
+
+            taker_income = taker_trade_price * fill_qty
+            maker_income = maker_trade_price * fill_qty
+
+            taker_user.total_points += taker_income
+            taker_user.available_points += taker_income
+
+            maker_user.total_points += maker_income
+            maker_user.available_points += maker_income
+
+            # Both lose their respective positions
+            await _upsert_position(session, taker.user_id, taker.market_id, taker.position, fill_qty, taker_trade_price, is_buy=False)
+            await _upsert_position(session, maker.user_id, maker.market_id, maker.position, fill_qty, maker_trade_price, is_buy=False)
+
         else:
             # Standard BID vs ASK trade: one buyer, one seller
             if taker.order_type == OrderType.BID:
